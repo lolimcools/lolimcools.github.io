@@ -1,0 +1,453 @@
+<html>
+
+<head>
+  <title>Angry Sharks</title>
+  <meta http-equiv="content-type" content="text/html; charset=windows-1252">
+
+  <script type="text/javascript" src="js/gl-matrix.js"></script>
+  <script type="text/javascript" src="js/game/game-utils.js"></script>
+  <script type="text/javascript" src="js/fbo.js"></script>
+  <script type="text/javascript" src="js/background.js"></script>
+  <script type="text/javascript" src="js/hero/modelObj.js"></script>
+  <script type="text/javascript" src="js/sprite/sprite.js"></script>
+  <script type="text/javascript" src="js/sprite/rocket.js"></script>
+  <script type="text/javascript" src="js/sprite/life.js"></script>
+  <script type="text/javascript" src="js/sprite/ammo.js"></script>
+  <script type="text/javascript" src="js/game/soundpool.js"></script>
+  <script type="text/javascript" src="js/game/bonus.js"></script>
+  <script type="text/javascript" src="js/game/score.js"></script>
+  <script type="text/javascript" src="js/enemy/bad-guy-manager.js"></script>
+  <script type="text/javascript" src="js/enemy/bad-fish.js"></script>
+  <script type="text/javascript" src="js/enemy/seahorse.js"></script>
+  <script type="text/javascript" src="js/enemy/blobfish.js"></script>
+  <script type="text/javascript" src="js/enemy/turtle.js"></script>
+  <script type="text/javascript" src="js/enemy/shark.js"></script>
+  <script type="text/javascript" src="js/enemy/nazi-shark.js"></script>
+  <script type="text/javascript" src="js/sprite/background-layer.js"></script>
+  <script type="text/javascript" src="js/sprite/mob.js"></script>
+  <script type="text/javascript" src="js/hero/hero.js"></script>
+  <script type="text/javascript" src="js/game/event.js"></script>
+  <script type="text/javascript" src="js/game/lifecycle.js"></script>
+  <script type="text/javascript" src="js/game/game-loop.js"></script>
+
+  <script id="model-vs" type="x-shader/x-vertex">#version 300 es
+    // *** le vertex shader ***
+    layout(location=0) in vec3 aVertexPosition;
+    layout(location=1) in vec3 aVertexNormal;
+
+    uniform mat4 uModelMatrix;
+    uniform mat4 uViewMatrix;
+    uniform mat4 uProjMatrix;
+    uniform float timer;
+
+    out vec3 vNormal;
+
+    void main(void) {
+      // projection de la position
+      vec3 p = aVertexPosition;
+
+      // exemple de modification de la hauteur du mod�le avec un simple timer
+      // bien pour les petits effets, mais si possible modifier directement la
+      // matrice model en amont (dans setParameters du fichier modelObj)
+      //p.z += 3.0*sin(timer*10.0);
+
+      gl_Position = uProjMatrix * uViewMatrix * uModelMatrix * vec4(p, 1.0);
+      vNormal = mat3(inverse(transpose(uViewMatrix * uModelMatrix)))*normalize(aVertexNormal);
+    }
+  </script>
+
+  <script id="model-fs" type="x-shader/x-fragment">#version 300 es
+    // *** le fragment shader ***
+    precision mediump float; // precision des nombres flottant
+    uniform vec3 maCouleur;
+    in vec3 vNormal;
+    out vec4 outColor;
+
+    void main(void) {
+      // la normale (en tout point)
+      vec3 n = normalize(vNormal);
+
+      // une direction de lumi�re quelconque
+      vec3 l = normalize(vec3(0.5,0.5,1.0));
+
+      // une couleur (ex. rouge)
+      vec3 Kd = vec3(0.9,0.5,0.0);
+
+      // un �clairage simple
+      vec3 diff = maCouleur*max(dot(n,l),0.0);
+
+      // que l'on affiche en sortie
+      outColor = vec4(diff,1.0);
+    }
+  </script>
+
+  <script id="splat-vs" type="x-shader/x-vertex">#version 300 es
+    // *** le vertex shader ***
+    layout(location=0) in vec3 aVertexPosition; // la position du sommet
+    layout(location=1) in vec2 aVertexCoord; // sa coordonnee de texture
+
+    uniform vec3 uPosition; // position du vaisseau
+    uniform float xOffset;
+    uniform float spriteScale;
+    out vec2 vTextureCoord; // on souhaite rasteriser la coordonnee
+
+    void main(void) {
+      // projection de la position
+      gl_Position = vec4(aVertexPosition.xy+uPosition.xy,uPosition.z, 1.0);
+
+
+      // stockage de la coordonnee de texture
+      vTextureCoord = vec2(aVertexCoord.x * spriteScale + xOffset, aVertexCoord.y);
+    }
+  </script>
+
+  <script id="splat-fs" type="x-shader/x-fragment">#version 300 es
+    // *** le fragment shader ***
+    precision highp float; // precision des nombres flottant
+
+    uniform vec3 maCouleur;
+    uniform sampler2D uTex;
+
+    in vec2 vTextureCoord; // recuperation de la coord rasterisee
+    out vec4 outColor;
+
+    void main(void) {
+
+      // affichage d'une texture
+      vec2 coord = vTextureCoord;
+      vec4 finalText = texture(uTex,coord);
+
+      if (finalText.w < 0.001) discard;
+      outColor = finalText;
+    }
+  </script>
+
+  <script type="text/javascript">
+    let background;
+    let hero;
+    let badGuyManager;
+    let bgParallax;
+    let score;
+    let bonus;
+    let soundpool;
+
+    document.onkeydown = startGame;
+    displayTopPlayer()
+
+  </script>
+
+  <style type="text/css">
+    /* @font-face {
+      font-family: "PixelArt";
+      src: url("font/pixel-art/pixelart.ttf?#iefix") format("truetype");
+    } */
+
+    @font-face {
+      font-family: 'Pixel-Art';
+      font-style: normal;
+      font-weight: normal;
+      src: url('font/pixel-art/pixelart.woff') format('woff'),
+           url("font/pixel-art/pixelart.ttf") format("truetype"),
+           url("font/pixel-art/pixelart.woff2") format("woff2");
+    }
+
+    body {
+      text-align: center;
+      margin: 0;
+      background: url("textures/underwater-fantasy-files/PNG/underwater-fantasy-preview.png") no-repeat center / cover;
+      object-fit: cover;
+      line-height: 25px;
+    }
+
+    h1 {
+      display: flex;
+    }
+
+    #SpaceShip {
+      border: none;
+      width: 100%;
+      height: 100%;
+    }
+
+    #menu {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .menu-container {
+      padding: 32px;
+      border-radius: 7px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      max-width: 1100px;
+      width: 100%;
+      color: white;
+      font-family: "Pixel-Art";
+    }
+    .explain-menu {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 16px;
+    }
+    .controls-menu {
+      max-width: 400px;
+      width: 100%;
+      padding: 16px;
+      border: solid 1px white;
+      border-radius: 7px;
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 16px;
+    }
+    .controls-menu .controls-menu-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .controls-menu .controls-menu-item:last-child {
+      margin-bottom: 0;
+    }
+    .controls-menu .controls-menu-item img {
+      width: 40px;
+      height: 40px;
+      margin-right: 10px;
+    }
+    .controls-menu .controls-menu-item p {
+      color: white;
+      text-align: left;
+    }
+    .bonus-menu {
+      max-width: 400px;
+      width: 100%;
+      padding: 16px;
+      border: solid 1px white;
+      border-radius: 7px;
+      display: flex;
+      flex-direction: column;
+    }
+    .bonus-menu .bonus-menu-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .bonus-menu .bonus-menu-item:last-child {
+      margin-bottom: 0;
+    }
+    .bonus-menu .bonus-menu-item img {
+      width: 50px;
+      height: 50px;
+      margin-right: 10px;
+    }
+    .bonus-menu .bonus-menu-item p {
+      color: white;
+      text-align: left;
+    }
+    .ennemies-menu {
+      max-width: 500px;
+      width: 100%;
+      padding: 16px;
+      border: solid 1px white;
+      border-radius: 7px;
+      display: flex;
+      flex-direction: column;
+    }
+    .ennemies-menu .ennemies-menu-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .ennemies-menu .ennemies-menu-item:last-child {
+      margin-bottom: 0;
+    }
+    .ennemies-menu .ennemies-menu-item img {
+      margin-right: 10px;
+    }
+    .ennemies-menu .ennemies-menu-item p {
+      color: white;
+      text-align: left;
+    }
+    .ennemies-menu .ennemies-menu-item #seahorse {
+      width: 20px;
+      height: 40px;
+    }
+    .ennemies-menu .ennemies-menu-item #shark {
+      width: 60px;
+      height: 40px;
+    }
+    .ennemies-menu .ennemies-menu-item #turtle {
+      width: 60px;
+      height: 40px;
+    }
+    .ennemies-menu .ennemies-menu-item #blobfish {
+      width: 50px;
+      height: 30px;
+    }
+    .ennemies-menu .ennemies-menu-item #nazi-shark {
+      width: 60px;
+      height: 40px;
+    }
+
+    #end-menu {
+      display: none;
+      width: 100vw;
+      height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .end-menu-container {
+      padding: 32px;
+      border-radius: 7px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      max-width: 1100px;
+      width: 100%;
+      color: white;
+      font-family: "Pixel-Art";
+    }
+
+    input {
+      padding: 16px;
+      background-color: transparent;
+      border-radius: 7px;
+      border: solid 1px white;
+      font-family: "Pixel-Art";
+      color: white;
+      outline: none;
+    }
+    ::placeholder {
+      color: lightgrey;
+      opacity: 1;
+    }
+
+    #points {
+      margin: 0 8px;
+    }
+
+    .button {
+      border: solid 1px #66D7D6;
+      border-radius: 7px;
+      padding: 16px;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: transparent;
+      transition: all .2s ease;
+      margin-top: 100px;
+      outline: none;
+      cursor: pointer;
+      font-family: "Pixel-Art";
+    }
+    .button:hover {
+      background-color: #66D7D6;
+    }
+    .button img {
+      width: 25px;
+      height: 25px;
+      margin-right: 8px;
+    }
+    .scores-container {
+      max-width: 300px;
+      width: 100%;
+      position: absolute;
+      top: 0;
+      right: 0;
+      border: solid 1px white;
+      border-radius: 0 0 0 7px;
+      border-top: 0;
+      border-right: 0;
+      padding: 16px;
+    }
+    .scores-container h1 {
+      margin-top: 0;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="SpaceShip" width="1080" height="720" style="display: none"></canvas>
+    <div id="menu">
+      <div class="menu-container">
+        <h1>WELCOME TO THE "ANGRY SHARKS" GAME !</h1>
+        <p>Press a key to destroy sharks ...</p>
+        <div class="explain-menu">
+          <div class="left-container">
+            <div class="controls-menu mb-1">
+              <div class="controls-menu-item">
+                <img src="textures/missile_ui.png" alt="">
+                <p>You can kill the ennemies with Z</p>
+              </div>
+              <div class="controls-menu-item">
+                <img src="models/Bonus/Spnning-Orb/Blue/frame-1.png" alt="">
+                <p>You can slow down the ennemies with space</p>
+              </div>
+            </div>
+            <div class="bonus-menu">
+              <div class="bonus-menu-item">
+                <img src="models/Bonus/shieldBonus.png" alt="">
+                <p>You are invincible for 10 seconds</p>
+              </div>
+              <div class="bonus-menu-item">
+                <img src="models/Bonus/gunBonus.png" alt="">
+                <p>Gives you 3 ammos to kill the creatures</p>
+              </div>
+              <div class="bonus-menu-item">
+                <img src="models/Bonus/slowBonus.png" alt="">
+                <p>All the ennemies are slower</p>
+              </div>
+            </div>
+          </div>
+          <div class="scores-container">
+            <h2>Top players : </h2>
+            <div class="scores">
+              <p>loading...</p>
+            </div>
+          </div>
+          <div class="ennemies-menu">
+            <div class="ennemies-menu-item">
+              <img id="seahorse" src="textures/seahorse.gif" alt="">
+              <p>You can eat the seahorses to earn points</p>
+            </div>
+            <div class="ennemies-menu-item">
+              <img id="shark" src="textures/shark.gif" alt="">
+              <p>You can't eat the sharks, but kill them with the gun bonus</p>
+            </div>
+            <div class="ennemies-menu-item">
+              <img id="turtle" src="textures/turtle.gif" alt="">
+              <p>You can only eat the turtles when they are out of their shells</p>
+            </div>
+            <div class="ennemies-menu-item">
+              <img id="blobfish" src="textures/blobfish.png" alt="">
+              <p>Eat the blobfish to receive 300 points</p>
+            </div>
+            <div class="ennemies-menu-item">
+              <img id="nazi-shark" src="textures/nazi-shark.png" alt="">
+              <p>This is the boss (sac-à-PV)</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="end-menu">
+      <div class="end-menu-container">
+        <h1>You made <div id="points"></div> points !</h1>
+        <p>Enter your name :</p>
+        <input type="text" name="name" value="" maxlength="15" placeholder="Pseudo">
+        <button class="button" type="button" name="button" onclick="displayStartMenu(true)"><img src="models/long-arrow-alt-left-solid.svg" alt="">Save your score and play again :)</button>
+      </div>
+    </div>
+  </div>
+</body>
+
+</html>
